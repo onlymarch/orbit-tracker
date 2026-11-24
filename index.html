@@ -163,13 +163,54 @@ function details(h){
  const speed=h.speed==null?'계산 불가':h.speed.toFixed(2)+' km/s';
  $('detail').textContent=h.name+' · '+ownerLabel(owner(h))+' · NORAD '+h.id+'\n직하점 '+h.p.lat.toFixed(3)+'°, '+h.p.lon.toFixed(3)+'° · 고도 '+h.p.alt.toFixed(1)+' km · 지상거리 '+h.p.dist.toFixed(1)+' km\n직전 15초 평균 지상속도 '+speed+' · 위치 시각 '+fmt(h.at)+'\n궤도 기준 '+fmt(h.epoch);
 }
+// Each source gets its own deadline; a failed upstream cannot cancel its fallback.
+async function getData(address,kind='json',parent){
+ const controller=new AbortController(),stop=()=>controller.abort();
+ if(parent?.aborted)stop();else parent?.addEventListener('abort',stop,{once:true});
+ const timer=setTimeout(stop,12000);
+ try{
+  const response=await fetch(address,{signal:controller.signal});
+  if(!response.ok)throw Error('HTTP '+response.status);
+  return kind==='json'?await response.json():await response.text();
+ }finally{clearTimeout(timer);parent?.removeEventListener('abort',stop)}
+}
+let snapshotPromise;
+function snapshot(){
+ if(!snapshotPromise)snapshotPromise=getData('./data/catalog.json').then(s=>{
+  if(!Array.isArray(s.rows)||!s.rows.length||!s.fields.includes('EPOCH')||!s.owners||!Number.isFinite(Date.parse(s.asOf)))throw Error('자료 형식');
+  return s;
+ }).catch(e=>{snapshotPromise=null;throw e});
+ return snapshotPromise;
+}
+function snapshotRows(s){return s.rows.map(r=>Object.fromEntries(s.fields.map((f,i)=>[f,r[i]])))}
+function savedData(key){
+ // IndexedDB can remain pending when storage access is restricted.
+ return Promise.race([cache('readonly',null,key).catch(()=>null),new Promise(ok=>setTimeout(()=>ok(null),1500))]);
+}
+function csvOwners(csv){
+ const map=new Map();let headers;
+ for(const line of csv.trim().split(/\r?\n/)){
+  const cells=Array.from(line.matchAll(/(?:^|,)("(?:[^"]|"")*"|[^,]*)/g),m=>m[1].replace(/^"|"$/g,'').replace(/""/g,'"'));
+  if(!headers){headers=[cells.indexOf('NORAD_CAT_ID'),cells.indexOf('OWNER')];if(headers.includes(-1))throw Error('SATCAT 열 누락');continue}
+  const id=cells[headers[0]],code=cells[headers[1]];if(/^\d+$/.test(id)&&code)map.set(id,code);
+ }
+ return map;
+}
 async function loadOwners(){
- const serial=++ownerRevision;
- const saved=await cache('readonly',null,'owners').catch(()=>null);if(serial!==ownerRevision)return;
- if(saved){ownerMap=new Map(saved.pairs);updateCountry();$('ownerState').textContent='소유 자료 · 수신 '+fmt(saved.time);if(Date.now()-saved.time<86400000)return}
- try{const response=await fetch(ownershipURL,{signal:AbortSignal.timeout(18000)});if(!response.ok)throw Error();const map=ownerIndex(await response.json());if(!map.size)throw Error();if(serial!==ownerRevision)return;
- ownerMap=map;updateCountry();$('ownerState').textContent='SATCAT 소유 자료 '+map.size.toLocaleString()+'건';await cache('readwrite',{time:Date.now(),pairs:[...map]},'owners').catch(()=>{});
- }catch{if(serial===ownerRevision)$('ownerState').textContent=saved?'소유 자료 · 저장본 '+fmt(saved.time):'소유 자료 연결 실패 · SATCAT JSON을 직접 열 수 있습니다.'}
+ const serial=++ownerRevision,saved=await savedData('owners');
+ if(serial!==ownerRevision)return;
+ let online=false;
+ const display=(map,label)=>{ownerMap=map;updateCountry();$('ownerState').textContent=label};
+ if(saved?.pairs?.length){display(new Map(saved.pairs),(saved.label||'SATCAT 저장 자료')+' · '+fmt(saved.time));if(Date.now()-saved.time<DAY)return}
+ if(!saved)snapshot().then(s=>{if(serial===ownerRevision&&!online)display(new Map(Object.entries(s.owners)),'SATCAT 예비 자료 · '+fmt(Date.parse(s.asOf)))}).catch(()=>{});
+ for(const [address,label,format] of [[ownershipURL,'CelesTrak SATCAT','json'],['https://raw.githubusercontent.com/astrion-tech/celestrak-mirror/main/satcat/satcat.csv','SATCAT 공개 미러','text']]){
+  try{const data=await getData(address,format);if(serial!==ownerRevision)return;
+   const map=format==='json'?ownerIndex(data):csvOwners(data);if(!map.size)throw Error();
+   const time=Date.now();online=true;display(map,label+' · 수신 '+fmt(time));
+   cache('readwrite',{time,pairs:[...map],label},'owners').catch(()=>{});return
+  }catch{if(serial!==ownerRevision)return}
+ }
+ if(!ownerMap.size)$('ownerState').textContent='소유 자료 수신 실패 · 소유 자료 열기로 SATCAT JSON을 선택하세요.';
 }
 $('ownerFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;const serial=++ownerRevision;try{const map=ownerIndex(JSON.parse(await f.text()));if(!map.size)throw Error();if(serial!==ownerRevision)return;ownerMap=map;updateCountry();$('ownerState').textContent=f.name+' · '+map.size+'건'}catch{if(serial===ownerRevision)$('ownerState').textContent='NORAD_CAT_ID와 OWNER가 있는 SATCAT JSON을 선택하세요.'}finally{e.target.value=''}};
 const camera={scale:1,center:null,projection:null};
@@ -451,13 +492,29 @@ async function cache(mode,value,key='active'){
 }
 async function fetchCatalog(){
  const n=++token;acquisition?.abort();const ctl=new AbortController();acquisition=ctl;
- const cached=await cache('readonly').catch(()=>null);if(n!==token)return;
- const label=t=>'CelesTrak 운용 위성 · 수신 '+fmt(t);
- if(cached && Date.now()-cached.time<7200000){install(cached.rows,label(cached.time));return}
- $('source').textContent='CelesTrak 목록 수신 중…';const timer=setTimeout(()=>ctl.abort(),25000);
- try{const res=await fetch(url,{signal:ctl.signal});if(!res.ok)throw Error(String(res.status));const rows=await res.json();if(n!==token)return;const time=Date.now();install(rows,label(time));await cache('readwrite',{time,rows}).catch(()=>{})}
- catch{if(n!==token)return;if(cached)install(cached.rows,'연결 실패 · 저장 자료 '+fmt(cached.time));else $('source').textContent='연결 실패. 공식 JSON을 내려받아 열거나 ISS 예제를 선택하세요.'+(raw?' 이전 목록으로 계산합니다.':'')}
- finally{clearTimeout(timer)}
+ const cached=await savedData('active');if(n!==token)return;
+ let online=false,available=false;
+ if(cached?.rows?.length){
+  try{install(cached.rows,(cached.label||'CelesTrak')+' · 저장 자료 '+fmt(cached.time));available=true;if(Date.now()-cached.time<7200000)return}catch{}
+ }
+ $('source').textContent=available?'저장 자료 사용 중 · 최신 목록 확인 중…':'운용 위성 및 예비 자료 수신 중…';
+ let backup=Promise.resolve();
+ if(!available)backup=snapshot().then(s=>{
+  if(n!==token||online)return;
+  install(snapshotRows(s),'예비 궤도자료 ('+s.scope+') · '+fmt(Date.parse(s.asOf)));
+  available=true;
+ }).catch(()=>{});
+ for(const [address,label] of [[url,'CelesTrak'],['https://orbit-data.mikepreston.org/v1/gp/active.json','CelesTrak 공개 미러 (Orbit Data)']]){
+  try{
+   const rows=await getData(address,'json',ctl.signal);if(n!==token)return;
+   if(!Array.isArray(rows)||!rows.some(r=>r?.EPOCH&&Math.abs(Date.now()-Date.parse(String(r.EPOCH).replace(/Z?$/,'Z')))<14*DAY))throw Error('최신 궤도 없음');
+   const time=Date.now();install(rows,label+' · 수신 '+fmt(time));online=true;
+   cache('readwrite',{time,rows,label}).catch(()=>{});return;
+  }catch{if(n!==token)return}
+ }
+ await backup;if(n!==token)return;
+ if(available)$('source').textContent+=' · 최신 전체 목록 수신 실패';
+ else $('source').textContent='전체 목록과 예비 자료 수신 실패 · GP JSON을 열거나 ISS 예제를 선택하세요.';
 }
 $('fetchBtn').onclick=fetchCatalog;
 $('file').onchange=async e=>{const file=e.target.files[0];if(!file)return;const n=++token;acquisition?.abort();try{const rows=JSON.parse(await file.text());if(n===token)install(rows,file.name)}catch{if(n===token)$('source').textContent='파일을 읽지 못했습니다. CelesTrak GP JSON 배열을 선택하세요.'+(raw?' 이전 목록을 유지합니다.':'')}e.target.value=''};
