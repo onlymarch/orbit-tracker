@@ -51,7 +51,7 @@
 ## 결과가 비거나 연결이 끊길 때
 
 - **통과가 0건이면** 자료 수신 상태와 ‘시각 범위 제외’ 개수를 확인하세요. 사용할 수 있는 자료가 있다면 탐색 구간을 30분으로 늘리거나 반경·고도 제한을 넓혀 보세요.
-- **온라인 자료 수신이 실패하면** 저장된 자료가 있을 때 이를 사용합니다. 직접 내려받은 GP 자료는 **JSON 열기**, 소유 정보는 **소유 자료 열기**로 불러올 수 있습니다. [운용 위성 GP JSON](https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json) · [운용 위성 SATCAT JSON](https://celestrak.org/satcat/records.php?GROUP=active&FORMAT=json)
+- **온라인 자료 수신이 실패하면** 앱은 궤도 목록과 소유 정보를 각각 공개 미러에서 다시 조회합니다. 첫 방문에도 GitHub Pages에 함께 배포한 예비 자료를 사용할 수 있습니다. 예비 궤도자료는 일부 위성군만 포함하고, 14일 기준을 초과하는 궤도는 현재 시각 계산에서 제외됩니다. 화면에서 자료 출처·기준일을 확인하세요. [예비 자료 출처](https://github.com/astrion-tech/celestrak-mirror) · [전체 GP 공개 미러](https://github.com/Darkflib/orbit-data) 직접 내려받은 GP 자료는 **JSON 열기**, 소유 정보는 **소유 자료 열기**로 불러올 수 있습니다. [운용 위성 GP JSON](https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=json) · [운용 위성 SATCAT JSON](https://celestrak.org/satcat/records.php?GROUP=active&FORMAT=json)
 - **특정 위성이 미확인으로 표시되면** 해당 항목의 소유·임무 자료가 있는지 확인하세요. 사진이나 운영기관 자료가 없어도 유효한 궤도요소가 있으면 위치 계산은 가능합니다.
 
 ## 로컬 실행과 배포
